@@ -4,18 +4,20 @@
 # Script used to install and configure swiftly.
 # 
 # This script will download the latest released swiftly executable and install it
-# to $SWIFTLY_BIN_DIR, or ~/.local/bin if that variable isn't specified.
+# to $SWIFTLY_BIN_DIR, or ~/.local/bin (Linux) and ~/Library/Application Support/swiftly/bin (macOS)
+# if that variable isn't specified.
 #
 # This script will also create a directory at $SWIFTLY_HOME_DIR, or
 # $XDG_DATA_HOME/swiftly if that variable isn't specified. If XDG_DATA_HOME is also unset,
-# ~/.local/share/swiftly will be used as a default instead. swiftly will use this directory
-# to store platform information, downloaded toolchains, and other state required to manage
-# the toolchains.
+# ~/.local/share/swiftly (Linux) or ~/Library/Application Support/swift (macOS)  will be used as a default
+# instead. swiftly will use this directory to store platform information, downloaded toolchains, and other
+# state required to manage the toolchains.
 #
-# After installation, the script will create $SWIFTLY_HOME_DIR/env.sh, which can be sourced
+# After installation, the script will create $SWIFTLY_HOME_DIR/env.{sh,fish}, which can be sourced
 # to properly set up the environment variables required to run swiftly. Unless --no-modify-profile
-# was specified, the script will also update ~/.profile, ~/.bash_profile, ~/.bash_login, or ~/.zprofile,
-# depending on the value of $SHELL and the existence of the files, to source the env.sh file on login.
+# was specified, the script will also update ~/.profile, ~/.bash_profile, ~/.bash_login, ~/.zprofile,
+# $XDG_CONFIG_HOME/fish/conf.d/swiftly.fish, or ~/.config/fish/conf.d/swiftly.fish depending on
+# the value of $SHELL and the existence of the files, to source the env.{sh,fish} file on login.
 # This will ensure that future logins will automatically configure SWIFTLY_HOME_DIR, SWIFTLY_BIN_DIR,
 # and PATH.
 #
@@ -148,6 +150,9 @@ install_system_deps () {
     if [[ "${package_list[-1]}" =~ ^\&\& ]]; then
         unset 'package_list[-1]'
     fi
+
+    # Always install gpg, since swiftly itself needs it for signature verification.
+    package_list+=("gpg")
 
     install_args=(--quiet -y)
 
@@ -316,7 +321,7 @@ verify_getopt_install () {
     return "$?"
 }
 
-SWIFTLY_INSTALL_VERSION="0.3.0"
+SWIFTLY_INSTALL_VERSION="0.4.0"
 
 MODIFY_PROFILE="true"
 SWIFTLY_INSTALL_SYSTEM_DEPS="true"
@@ -326,18 +331,27 @@ if ! has_command "curl" ; then
     exit 1
 fi
 
-if ! verify_getopt_install ; then
-    echo "Error: getopt must be installed from the util-linux package to run swiftly-install"
-    exit 1
+IS_MACOS="false"
+if [ "$(uname -s)" == "Darwin" ] ; then
+    IS_MACOS="true"
+fi
+
+if [ "$IS_MACOS" == "false" ]; then
+    if ! verify_getopt_install ; then
+        echo "Error: getopt must be installed from the util-linux package to run swiftly-install"
+        exit 1
+    fi
 fi
 
 set -o errexit
 shopt -s extglob
 
-short_options='yhvp:'
-long_options='disable-confirmation,no-modify-profile,no-install-system-deps,help,version,platform:,overwrite'
+if [ "$IS_MACOS" == "true" ]; then
+    args=$(getopt ynohvp: $*)
+else
+    args=$(getopt --options ynohvp: --longoptions disable-confirmation,no-modify-profile,no-install-system-deps,help,version,platform:,overwrite --name swiftly-install -- "${@}")
+fi
 
-args=$(getopt --options "$short_options" --longoptions "$long_options" --name "swiftly-install" -- "${@}")
 eval "set -- ${args}"
 
 while [ true ]; do
@@ -352,19 +366,24 @@ USAGE:
 
 OPTIONS:
     -y, --disable-confirmation  Disable confirmation prompts.
-    --no-modify-profile         Do not attempt to modify the profile file to set environment 
+    -n, --no-modify-profile     Do not attempt to modify the profile file to set environment
                                 variables (e.g. PATH) on login.
-    --no-install-system-deps    Do not attempt to install Swift's required system dependencies.
+    --no-install-system-deps    Do not attempt to install Swift's required system dependencies (LINUX ONLY)
+    --no-import-pgp-keys        Do not attempt to import Swift's PGP keys. (LINUX ONLY)
     -p, --platform <platform>   Specifies which platform's toolchains swiftly will download. If
                                 unspecified, the platform will be automatically detected. Available
                                 options are "ubuntu22.04", "ubuntu20.04", "ubuntu18.04", "rhel9", and
-                                "amazonlinux2".
-    --overwrite                 Overwrite the existing swiftly installation found at the configured
+                                "amazonlinux2". (LINUX ONLY)
+    -o, --overwrite             Overwrite the existing swiftly installation found at the configured
                                 SWIFTLY_HOME, if any. If this option is unspecified and an existing
                                 installation is found, the swiftly executable will be updated, but
                                 the rest of the installation will not be modified.
     -h, --help                  Prints help information.
-    --version                   Prints version information.
+    -v, --version               Prints version information.
+
+NOTES:
+    macOS only works with the short options (e.g. -v and not --version).
+
 EOF
             exit 0
             ;;
@@ -374,7 +393,7 @@ EOF
             shift
             ;;
 
-        "--no-modify-profile")
+        "--no-modify-profile" | "-n")
             MODIFY_PROFILE="false"
             shift
             ;;
@@ -384,7 +403,12 @@ EOF
             shift
             ;;
 
-        "--version")
+        "--no-import-pgp-keys")
+            swiftly_import_pgp_keys="false"
+            shift
+            ;;
+
+        "--version" | "-v")
             echo "$SWIFTLY_INSTALL_VERSION"
             exit 0
             ;;
@@ -419,7 +443,7 @@ EOF
             shift 2
             ;;
 
-        "--overwrite")
+        "--overwrite" | "-o")
             overwrite_existing_intallation="true"
             shift
             ;;
@@ -428,16 +452,20 @@ EOF
             shift
             break
             ;;
-
         *)
-            echo "Error: unrecognized option \"$arg\""
+            echo "Error: unrecognized option \"$1\""
+            if [ "$IS_MACOS" == "true" ]; then
+                echo "Note that on macOS you must use the short options (e.g. -v, not --version)."
+            fi
             exit 1
             ;;
     esac
 done
 
-if [[ -z "$PLATFORM_NAME" ]]; then
-    detect_platform
+if [ "$IS_MACOS" == "false" ]; then
+    if [[ -z "$PLATFORM_NAME" ]]; then
+        detect_platform
+    fi
 fi
 
 RAW_ARCH="$(uname -m)"
@@ -458,7 +486,8 @@ case "$RAW_ARCH" in
         ;;
 esac
 
-JSON_OUT=$(cat <<EOF
+if [ "$IS_MACOS" == "false" ]; then
+    JSON_OUT=$(cat <<EOF
 {
   "platform": {
     "name": "$PLATFORM_NAME",
@@ -470,7 +499,8 @@ JSON_OUT=$(cat <<EOF
   "inUse": null
 }
 EOF
-)
+    )
+fi
 
 PROFILE_FILE="$HOME/.profile"
 case "$SHELL" in
@@ -486,16 +516,33 @@ case "$SHELL" in
             PROFILE_FILE="$HOME/.bash_login"
         fi
         ;;
+    *"fish")
+        # $XDG_CONFIG_HOME/fish/conf.d/swiftly.fish or ~/.config/fish/conf.d/swiftly.fish
+        # https://github.com/fish-shell/fish-shell/issues/3170#issuecomment-228311857
+        if [ -n "$XDG_CONFIG_HOME" ]; then
+            PROFILE_FILE="$XDG_CONFIG_HOME/fish/conf.d/swiftly.fish"
+        else
+            PROFILE_FILE="$HOME/.config/fish/conf.d/swiftly.fish"
+        fi
+        ;;
     *)
 esac
 
 echo "This script will install swiftly, a Swift toolchain installer and manager."
 echo ""
 
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+if [ "$IS_MACOS" == "false" ]; then
+    DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+else
+    DATA_DIR="$HOME/Library/Application Support"
+fi
 DEFAULT_HOME_DIR="$DATA_DIR/swiftly"
 HOME_DIR="${SWIFTLY_HOME_DIR:-$DEFAULT_HOME_DIR}"
-DEFAULT_BIN_DIR="$HOME/.local/bin"
+if [ "$IS_MACOS" == "false" ]; then
+    DEFAULT_BIN_DIR="$HOME/.local/bin"
+else
+    DEFAULT_BIN_DIR="$HOME_DIR/bin"
+fi
 BIN_DIR="${SWIFTLY_BIN_DIR:-$DEFAULT_BIN_DIR}"
 
 while [ -z "$DISABLE_CONFIRMATION" ]; do
@@ -547,19 +594,27 @@ if [[ -f "$HOME_DIR/config.json" ]]; then
     detected_existing_installation="true"
     if [[ "$overwrite_existing_intallation" == "true" ]]; then
         echo "Overwriting existing swiftly installation at $(replace_home_path $HOME_DIR)"
-        find $BIN_DIR -lname "$HOME_DIR/toolchains/**/bin/*" -delete
+        if [ "$IS_MACOS" == "false" ]; then
+            find $BIN_DIR -lname "$HOME_DIR/toolchains/**/bin/*" -delete
+        else
+            rm "$HOME_DIR/config.json"
+        fi
         rm -r $HOME_DIR
     else
         echo "Updating existing swiftly installation at $(replace_home_path $HOME_DIR)"
     fi
 fi
 
-mkdir -p $HOME_DIR/toolchains
-mkdir -p $BIN_DIR
+mkdir -p "$BIN_DIR"
 
-EXECUTABLE_NAME="swiftly-$ARCH-unknown-linux-gnu"
+if [ "$IS_MACOS" == "false" ]; then
+    EXECUTABLE_NAME="swiftly-$ARCH-unknown-linux-gnu"
+else
+    EXECUTABLE_NAME="swiftly-$ARCH-macos-osx"
+fi
 DOWNLOAD_URL="https://github.com/swift-server/swiftly/releases/latest/download/$EXECUTABLE_NAME"
 echo "Downloading swiftly from $DOWNLOAD_URL..."
+
 curl \
     --retry 3 \
     --location \
@@ -570,32 +625,53 @@ curl \
 
 chmod +x "$BIN_DIR/swiftly"
 
-if [[ "$detected_existing_installation" != "true" || "$overwrite_existing_intallation" == "true" ]]; then
-    echo "$JSON_OUT" > "$HOME_DIR/config.json"
-
-    # Verify the downloaded executable works. The script will exit if this fails due to errexit.
-    SWIFTLY_HOME_DIR="$HOME_DIR" SWIFTLY_BIN_DIR="$BIN_DIR" "$BIN_DIR/swiftly" --version > /dev/null
-
-    ENV_OUT=$(cat <<EOF
+case "$SHELL" in
+    *"fish")
+        ENV_OUT=$(cat <<EOF
+set -x SWIFTLY_HOME_DIR "$(replace_home_path $HOME_DIR)"
+set -x SWIFTLY_BIN_DIR "$(replace_home_path $BIN_DIR)"
+if not contains "\$SWIFTLY_BIN_DIR" \$PATH
+   set -x PATH "\$SWIFTLY_BIN_DIR" \$PATH
+end
+EOF
+               )
+        ENV_FILE="env.fish"
+        SOURCE_LINE="source $(replace_home_path $HOME_DIR)/$ENV_FILE"
+        ;;
+    *)
+        ENV_OUT=$(cat <<EOF
 export SWIFTLY_HOME_DIR="$(replace_home_path $HOME_DIR)"
 export SWIFTLY_BIN_DIR="$(replace_home_path $BIN_DIR)"
 if [[ ":\$PATH:" != *":\$SWIFTLY_BIN_DIR:"* ]]; then
    export PATH="\$SWIFTLY_BIN_DIR:\$PATH"
 fi
 EOF
-           )
+               )
+        ENV_FILE="env.sh"
+        SOURCE_LINE=". $(replace_home_path $HOME_DIR)/$ENV_FILE"
+        ;;
+esac
 
-    echo "$ENV_OUT" > "$HOME_DIR/env.sh"
+if [[ "$detected_existing_installation" != "true" || "$overwrite_existing_intallation" == "true" ]]; then
+    mkdir -p "$HOME_DIR"
+    if [ "$IS_MACOS" == "false" ]; then
+        echo "$JSON_OUT" > "$HOME_DIR/config.json"
+    fi
+
+    # Verify the downloaded executable works. The script will exit if this fails due to errexit.
+    SWIFTLY_HOME_DIR="$HOME_DIR" SWIFTLY_BIN_DIR="$BIN_DIR" "$BIN_DIR/swiftly" --version > /dev/null
+
+    echo "$ENV_OUT" > "$HOME_DIR/$ENV_FILE"
 
     if [[ "$MODIFY_PROFILE" == "true" ]]; then
-        SOURCE_LINE=". $(replace_home_path $HOME_DIR)/env.sh"
-
         # Only append the line if it isn't in .profile already.
         if [[ ! -f "$PROFILE_FILE" ]] || [[ ! "$(cat $PROFILE_FILE)" =~ "$SOURCE_LINE" ]]; then
             echo "$SOURCE_LINE" >> "$PROFILE_FILE"
         fi
     fi
+fi
 
+if [ "$IS_MACOS" == "false" ]; then
     if [[ "$SWIFTLY_INSTALL_SYSTEM_DEPS" != "false" ]]; then
         echo ""
         echo "Installing Swift's system dependencies via $package_manager (note: this may require root access)..."
@@ -603,15 +679,29 @@ EOF
     fi
 fi
 
+if [ "$IS_MACOS" == "false" ]; then
+    if [[ "$swiftly_import_pgp_keys" != "false" ]]; then
+        if has_command gpg ; then
+            echo ""
+            echo "Importing Swift's PGP keys..."
+            curl --silent --retry 3 --location --fail https://swift.org/keys/all-keys.asc | gpg --import -
+        else
+            echo "gpg not installed, skipping import of Swift's PGP keys."
+        fi
+    fi
+fi
+
 echo ""
-echo "swiftly has been succesfully installed!"
+echo "swiftly has been successfully installed!"
 echo ""
 
 if ! has_command "swiftly" || [[ "$HOME_DIR" != "$DEFAULT_HOME_DIR" || "$BIN_DIR" != "$DEFAULT_BIN_DIR" ]] ; then
-    echo "Once you log in again, swiftly should be accessible from your PATH."
+    if [[ "$MODIFY_PROFILE" == "true" ]]; then
+        echo "Once you log in again, swiftly should be accessible from your PATH."
+    fi
     echo "To begin using swiftly from your current shell, first run the following command:"
     echo ""
-    echo "    . $(replace_home_path $HOME_DIR)/env.sh"
+    echo "    $SOURCE_LINE"
     echo ""
     echo "Then to install the latest version of Swift, run 'swiftly install latest'"
     echo ""
@@ -622,4 +712,11 @@ if ! has_command "swiftly" || [[ "$HOME_DIR" != "$DEFAULT_HOME_DIR" || "$BIN_DIR
     echo "to give the swiftly install directory predence immediately."
 else
     echo "To install the latest version of Swift, run 'swiftly install latest'"
+fi
+
+if has_command "swift" ; then
+    echo ""
+    echo "Warning: existing installation of Swift detected at $(command -v swift)"
+    echo "To ensure swiftly-installed toolchains can be found by the shell, uninstall any existing Swift installation(s)."
+    echo "To ensure the current shell can find swiftly-installed toolchains, you may also need to run 'hash -r'."
 fi

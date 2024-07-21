@@ -17,12 +17,67 @@ public struct Linux: Platform {
         }
     }
 
+    public var swiftlyBinDir: URL {
+        SwiftlyCore.mockedHomeDir.map { $0.appendingPathComponent("bin", isDirectory: true) }
+            ?? ProcessInfo.processInfo.environment["SWIFTLY_BIN_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+    }
+
+    public var swiftlyToolchainsDir: URL {
+        self.swiftlyHomeDir.appendingPathComponent("toolchains", isDirectory: true)
+    }
+
     public var toolchainFileExtension: String {
         "tar.gz"
     }
 
     public func isSystemDependencyPresent(_: SystemDependency) -> Bool {
         true
+    }
+
+    private static let skipVerificationMessage: String = "To skip signature verification, specify the --no-verify flag."
+
+    public func verifySystemPrerequisitesForInstall(requireSignatureValidation: Bool) throws {
+        // The only prerequisite at the moment is that gpg is installed and the Swift project's keys have been imported.
+        guard requireSignatureValidation else {
+            return
+        }
+
+        guard (try? self.runProgram("gpg", "--version", quiet: true)) != nil else {
+            throw Error(message: "gpg not installed, cannot perform signature verification. To set up gpg for " +
+                "toolchain signature validation, follow the instructions at " +
+                "https://www.swift.org/install/linux/#installation-via-tarball. " + Self.skipVerificationMessage)
+        }
+
+        let foundKeys = (try? self.runProgram(
+            "gpg",
+            "--list-keys",
+            "swift-infrastructure@forums.swift.org",
+            "swift-infrastructure@swift.org",
+            quiet: true
+        )) != nil
+        guard foundKeys else {
+            throw Error(message: "Swift PGP keys not imported, cannot perform signature verification. " +
+                "To enable verification, import the keys with the following command: " +
+                "'wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -' " +
+                Self.skipVerificationMessage)
+        }
+
+        SwiftlyCore.print("Refreshing Swift PGP keys...")
+        do {
+            try self.runProgram(
+                "gpg",
+                "--quiet",
+                "--keyserver",
+                "hkp://keyserver.ubuntu.com",
+                "--refresh-keys",
+                "Swift"
+            )
+        } catch {
+            throw Error(message: "Failed to refresh PGP keys: \(error)")
+        }
     }
 
     public func install(from tmpFile: URL, version: ToolchainVersion) throws {
@@ -139,6 +194,27 @@ public struct Linux: Platform {
 
     public func getTempFilePath() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("swiftly-\(UUID())")
+    }
+
+    public func verifySignature(httpClient: SwiftlyHTTPClient, archiveDownloadURL: URL, archive: URL) async throws {
+        SwiftlyCore.print("Downloading toolchain signature...")
+        let sigFile = self.getTempFilePath()
+        FileManager.default.createFile(atPath: sigFile.path, contents: nil)
+        defer {
+            try? FileManager.default.removeItem(at: sigFile)
+        }
+
+        try await httpClient.downloadFile(
+            url: archiveDownloadURL.appendingPathExtension("sig"),
+            to: sigFile
+        )
+
+        SwiftlyCore.print("Verifying toolchain signature...")
+        do {
+            try self.runProgram("gpg", "--verify", sigFile.path, archive.path)
+        } catch {
+            throw Error(message: "Toolchain signature verification failed: \(error).")
+        }
     }
 
     public static let currentPlatform: any Platform = Linux()
